@@ -1,5 +1,5 @@
 #!/bin/bash
-# start.sh - Script bash para desplegar el backend del proyecto Pokemon API
+# start.sh - Script bash para desplegar el backend del Sistema de Gestion Bibliotecaria
 # Ejecuta: ./start.sh o bash start.sh
 
 # Colores para output
@@ -11,7 +11,8 @@ GRAY='\033[0;37m'
 NC='\033[0m' # No Color
 
 echo -e "${CYAN}========================================${NC}"
-echo -e "${CYAN}  Pokemon API - Despliegue${NC}"
+echo -e "${CYAN}  Sistema de Gestion Bibliotecaria${NC}"
+echo -e "${CYAN}  Backend Django - Despliegue${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
 
@@ -59,7 +60,7 @@ check_and_install_python() {
         elif [ "$PKG_MANAGER" = "brew" ]; then
             $INSTALL_CMD python3
         else
-            echo -e "${RED}✗ Error: Python no está instalado y no se pudo detectar el gestor de paquetes${NC}"
+            echo -e "${RED}Error: Python no esta instalado y no se pudo detectar el gestor de paquetes${NC}"
             echo -e "${RED}  Instala Python manualmente desde https://www.python.org/${NC}"
             exit 1
         fi
@@ -69,7 +70,7 @@ check_and_install_python() {
         elif command -v python &> /dev/null; then
             PYTHON_CMD=python
         else
-            echo -e "${RED}✗ Error: No se pudo instalar Python${NC}"
+            echo -e "${RED}Error: No se pudo instalar Python${NC}"
             exit 1
         fi
     fi
@@ -97,7 +98,7 @@ check_and_install_venv() {
         fi
         
         if ! $PYTHON_CMD -m venv --help &> /dev/null; then
-            echo -e "${RED}✗ Error: No se pudo instalar python3-venv${NC}"
+            echo -e "${RED}Error: No se pudo instalar python3-venv${NC}"
             echo -e "${YELLOW}  Intenta instalarlo manualmente${NC}"
             exit 1
         fi
@@ -122,7 +123,7 @@ fi
 echo -e "${GRAY}  Creando entorno virtual...${NC}"
 $PYTHON_CMD -m venv $VENV_PATH 2>&1
 if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ Error al crear el entorno virtual${NC}"
+    echo -e "${RED}Error al crear el entorno virtual${NC}"
     exit 1
 fi
 echo -e "${GREEN}Entorno virtual creado${NC}"
@@ -131,7 +132,7 @@ echo -e "${GREEN}Entorno virtual creado${NC}"
 echo -e "${GRAY}  Activando entorno virtual...${NC}"
 source "$VENV_PATH/bin/activate"
 if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ Error al activar el entorno virtual${NC}"
+    echo -e "${RED}Error al activar el entorno virtual${NC}"
     exit 1
 fi
 echo -e "${GREEN}Entorno virtual activado${NC}"
@@ -148,11 +149,11 @@ echo -e "${YELLOW}[4/5] Instalando dependencias...${NC}"
 if [ -f "requirements.txt" ]; then
     pip install -r requirements.txt --quiet
     if [ $? -ne 0 ]; then
-        echo -e "${RED}✗ Error al instalar dependencias${NC}"
+        echo -e "${RED}Error al instalar dependencias${NC}"
         exit 1
     fi
 else
-    echo -e "${RED}✗ No se encontró requirements.txt${NC}"
+    echo -e "${RED}No se encontro requirements.txt${NC}"
     exit 1
 fi
 echo -e "${GREEN}Dependencias instaladas${NC}"
@@ -162,7 +163,7 @@ echo ""
 echo -e "${YELLOW}[5/5] Ejecutando migraciones...${NC}"
 $PYTHON_CMD manage.py migrate --noinput
 if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ Error al ejecutar migraciones${NC}"
+    echo -e "${RED}Error al ejecutar migraciones${NC}"
     exit 1
 fi
 echo -e "${GREEN}Migraciones completadas${NC}"
@@ -174,9 +175,15 @@ echo -e "${CYAN}  Servidor iniciando...${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
 echo -e "${GREEN}API disponible en: http://localhost:8000/api/${NC}"
-echo -e "${GREEN}Endpoints:${NC}"
-echo -e "${GRAY}  - http://localhost:8000/api/generations/${NC}"
-echo -e "${GRAY}  - http://localhost:8000/api/pokedex/${NC}"
+echo -e "${GREEN}Documentacion:${NC}"
+echo -e "${GRAY}  - Swagger UI: http://localhost:8000/api/docs/${NC}"
+echo -e "${GRAY}  - Schema OpenAPI: http://localhost:8000/api/schema/${NC}"
+echo ""
+echo -e "${GREEN}Endpoints principales:${NC}"
+echo -e "${GRAY}  - POST /api/auth/register - Registro de usuarios${NC}"
+echo -e "${GRAY}  - POST /api/auth/login - Inicio de sesion${NC}"
+echo -e "${GRAY}  - GET /api/libros - Listar libros${NC}"
+echo -e "${GRAY}  - GET /api/prestamos - Listar prestamos${NC}"
 echo ""
 echo -e "${YELLOW}Presiona Ctrl+C para detener el servidor${NC}"
 echo ""

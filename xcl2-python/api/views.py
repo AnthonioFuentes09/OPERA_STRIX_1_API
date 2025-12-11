@@ -5,6 +5,8 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
 from django.utils import timezone
 from datetime import timedelta
+from django.db.models import Count, Sum, Q
+from django.db.models.functions import TruncDate
 from .auth_helpers import requiere_autenticacion, requiere_rol, generar_token_jwt
 from .models import Usuario, Libro, Prestamo, Reserva
 from .serializers import (
@@ -158,11 +160,11 @@ def login(request):
     contraseña = request.data.get('contraseña')
     
     if not correo or not contraseña:
-        return Response(
+            return Response(
             {'error': 'Correo y contraseña son requeridos'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
     try:
         usuario = Usuario.objects.get(correo=correo)
     except Usuario.DoesNotExist:
@@ -172,17 +174,17 @@ def login(request):
         )
     
     if not usuario.activo:
-        return Response(
+            return Response(
             {'error': 'Cuenta inactiva. Contacte al administrador.'},
             status=status.HTTP_403_FORBIDDEN
-        )
+            )
     
     if not usuario.check_password(contraseña):
-        return Response(
+            return Response(
             {'error': 'Correo o contraseña incorrectos'},
-            status=status.HTTP_401_UNAUTHORIZED
-        )
-    
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
     token = generar_token_jwt(usuario)
     usuario_data = UsuarioSerializer(usuario).data
     
@@ -443,7 +445,7 @@ def actualizar_libro(request, id):
     try:
         libro = Libro.objects.get(id=id)
     except Libro.DoesNotExist:
-        return Response(
+            return Response(
             {'error': 'Libro no encontrado'},
             status=status.HTTP_404_NOT_FOUND
         )
@@ -512,11 +514,11 @@ def eliminar_libro(request, id):
     try:
         libro = Libro.objects.get(id=id)
     except Libro.DoesNotExist:
-        return Response(
+            return Response(
             {'error': 'Libro no encontrado'},
-            status=status.HTTP_404_NOT_FOUND
-        )
-    
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
     # Validar que no tenga préstamos activos
     prestamos_activos = Prestamo.objects.filter(libro=libro, estado='activo').count()
     if prestamos_activos > 0:
@@ -602,12 +604,12 @@ def crear_prestamo(request):
         )
     
     # Validar que el usuario esté activo
-    if not usuario.activo:
-        return Response(
+        if not usuario.activo:
+            return Response(
             {'error': 'Usuario inactivo. Contacte al administrador.'},
-            status=status.HTTP_403_FORBIDDEN
-        )
-    
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
     serializer = PrestamoCreateSerializer(data=request.data)
     if serializer.is_valid():
         libro = serializer.validated_data['libro']
@@ -785,7 +787,7 @@ def devolver_libro(request, id):
     try:
         prestamo = Prestamo.objects.get(id=id)
     except Prestamo.DoesNotExist:
-        return Response(
+            return Response(
             {'error': 'Préstamo no encontrado'},
             status=status.HTTP_404_NOT_FOUND
         )
@@ -1385,4 +1387,801 @@ def notificar_disponibilidad(request):
         'reserva': reserva_data
     }, status=status.HTTP_200_OK)
 
-# Los demás escenarios se implementarán aquí
+# ==================== ESCENARIO 5: CONSULTAS Y REPORTES AVANZADOS ====================
+
+@extend_schema(
+    summary="Usuarios morosos",
+    description="Lista usuarios con multas pendientes. Solo bibliotecarios y administradores pueden acceder.",
+    parameters=[
+        OpenApiParameter(
+            name='min_multa',
+            type=OpenApiTypes.FLOAT,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar por multa mínima (Lempiras)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    responses={
+        200: {
+            'description': 'Lista de usuarios morosos',
+            'examples': {
+                'application/json': [
+                    {
+                        'id': 1,
+                        'nombre': 'Juan',
+                        'apellido': 'Pérez',
+                        'correo': 'juan.perez@email.com',
+                        'multas': 50.00,
+                        'prestamos_activos': 2,
+                        'prestamos_vencidos': 1
+                    }
+                ]
+            }
+        }
+    },
+    tags=['Reportes']
+)
+@api_view(['GET'])
+@requiere_autenticacion
+@requiere_rol('bibliotecario', 'admin')
+def usuarios_morosos(request):
+    """Lista usuarios con multas pendientes"""
+    usuarios = Usuario.objects.filter(multas__gt=0).order_by('-multas')
+    
+    # Filtro por multa mínima
+    min_multa = request.query_params.get('min_multa')
+    if min_multa:
+        try:
+            min_multa = float(min_multa)
+            usuarios = usuarios.filter(multas__gte=min_multa)
+        except ValueError:
+            pass
+    
+    # Agregar información adicional
+    resultado = []
+    for usuario in usuarios:
+        prestamos_activos = Prestamo.objects.filter(usuario=usuario, estado='activo').count()
+        prestamos_vencidos = Prestamo.objects.filter(
+            usuario=usuario,
+            estado='activo',
+            fechaDevolucionEsperada__lt=timezone.now()
+        ).count()
+        
+        resultado.append({
+            'id': usuario.id,
+            'nombre': usuario.nombre,
+            'apellido': usuario.apellido,
+            'correo': usuario.correo,
+            'telefono': usuario.telefono,
+            'multas': float(usuario.multas),
+            'prestamos_activos': prestamos_activos,
+            'prestamos_vencidos': prestamos_vencidos
+        })
+    
+    return Response(resultado, status=status.HTTP_200_OK)
+
+@extend_schema(
+    summary="Libros más prestados",
+    description="Lista los top 10 libros más prestados. Solo bibliotecarios y administradores pueden acceder.",
+    parameters=[
+        OpenApiParameter(
+            name='limite',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Número de libros a retornar (default: 10)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    responses={
+        200: {
+            'description': 'Lista de libros más prestados',
+            'examples': {
+                'application/json': [
+                    {
+                        'id': 1,
+                        'titulo': 'El Quijote',
+                        'autor': 'Miguel de Cervantes',
+                        'isbn': '978-84-376-0494-7',
+                        'total_prestamos': 25,
+                        'prestamos_activos': 3,
+                        'copias_disponibles': 2
+                    }
+                ]
+            }
+        }
+    },
+    tags=['Reportes']
+)
+@api_view(['GET'])
+@requiere_autenticacion
+@requiere_rol('bibliotecario', 'admin')
+def libros_populares(request):
+    """Lista los libros más prestados"""
+    limite = request.query_params.get('limite', 10)
+    try:
+        limite = int(limite)
+        if limite < 1 or limite > 50:
+            limite = 10
+    except ValueError:
+        limite = 10
+    
+    # Obtener libros con conteo de préstamos
+    libros = Libro.objects.annotate(
+        total_prestamos=Count('prestamos')
+    ).order_by('-total_prestamos')[:limite]
+    
+    resultado = []
+    for libro in libros:
+        prestamos_activos = Prestamo.objects.filter(libro=libro, estado='activo').count()
+        
+        resultado.append({
+            'id': libro.id,
+            'titulo': libro.titulo,
+            'autor': libro.autor,
+            'isbn': libro.isbn,
+            'categoria': libro.categoria,
+            'total_prestamos': libro.total_prestamos,
+            'prestamos_activos': prestamos_activos,
+            'copias_disponibles': libro.copiasDisponibles,
+            'copias_total': libro.copiasTotal
+        })
+    
+    return Response(resultado, status=status.HTTP_200_OK)
+
+@extend_schema(
+    summary="Mi historial de préstamos",
+    description="Lista el historial completo de préstamos del usuario autenticado, incluyendo préstamos activos, devueltos y vencidos.",
+    parameters=[
+        OpenApiParameter(
+            name='estado',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar por estado: activo, devuelto, vencido',
+            required=False
+        ),
+        OpenApiParameter(
+            name='fecha_desde',
+            type=OpenApiTypes.DATE,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar desde fecha (YYYY-MM-DD)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='fecha_hasta',
+            type=OpenApiTypes.DATE,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar hasta fecha (YYYY-MM-DD)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    responses={
+        200: {
+            'description': 'Historial de préstamos',
+            'examples': {
+                'application/json': [
+                    {
+                        'id': 1,
+                        'libro_titulo': 'El Quijote',
+                        'libro_autor': 'Miguel de Cervantes',
+                        'fechaPrestamo': '2024-01-15T10:00:00Z',
+                        'fechaDevolucionEsperada': '2024-12-31T23:59:59Z',
+                        'fechaDevolucionReal': '2024-01-20T10:00:00Z',
+                        'estado': 'devuelto',
+                        'diasRetraso': 0,
+                        'multaGenerada': 0.00
+                    }
+                ]
+            }
+        }
+    },
+    tags=['Reportes']
+)
+@api_view(['GET'])
+@requiere_autenticacion
+def mi_historial(request):
+    """Lista el historial completo de préstamos del usuario"""
+    usuario = request.usuario
+    
+    prestamos = Prestamo.objects.filter(usuario=usuario).order_by('-fechaPrestamo')
+    
+    # Filtros
+    estado = request.query_params.get('estado')
+    if estado:
+        prestamos = prestamos.filter(estado=estado)
+    
+    fecha_desde = request.query_params.get('fecha_desde')
+    if fecha_desde:
+        try:
+            from datetime import datetime
+            fecha_desde = datetime.strptime(fecha_desde, '%Y-%m-%d')
+            prestamos = prestamos.filter(fechaPrestamo__gte=fecha_desde)
+        except ValueError:
+            pass
+    
+    fecha_hasta = request.query_params.get('fecha_hasta')
+    if fecha_hasta:
+        try:
+            from datetime import datetime
+            fecha_hasta = datetime.strptime(fecha_hasta, '%Y-%m-%d')
+            # Incluir todo el día
+            fecha_hasta = fecha_hasta.replace(hour=23, minute=59, second=59)
+            prestamos = prestamos.filter(fechaPrestamo__lte=fecha_hasta)
+        except ValueError:
+            pass
+    
+    serializer = PrestamoSerializer(prestamos, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+@extend_schema(
+    summary="Préstamos vencidos",
+    description="Lista préstamos que han vencido y no han sido devueltos. Solo bibliotecarios y administradores pueden acceder.",
+    parameters=[
+        OpenApiParameter(
+            name='usuario',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar por ID de usuario',
+            required=False
+        ),
+        OpenApiParameter(
+            name='dias_vencido',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.QUERY,
+            description='Filtrar por días vencidos (mínimo)',
+            required=False
+        ),
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    responses={
+        200: {
+            'description': 'Lista de préstamos vencidos',
+            'examples': {
+                'application/json': [
+                    {
+                        'id': 1,
+                        'usuario_nombre': 'Juan Pérez',
+                        'libro_titulo': 'El Quijote',
+                        'fechaPrestamo': '2024-01-15T10:00:00Z',
+                        'fechaDevolucionEsperada': '2024-01-20T10:00:00Z',
+                        'dias_vencido': 5,
+                        'multa_estimada': 50.00
+                    }
+                ]
+            }
+        }
+    },
+    tags=['Reportes']
+)
+@api_view(['GET'])
+@requiere_autenticacion
+@requiere_rol('bibliotecario', 'admin')
+def prestamos_vencidos(request):
+    """Lista préstamos vencidos"""
+    fecha_actual = timezone.now()
+    
+    prestamos = Prestamo.objects.filter(
+        estado='activo',
+        fechaDevolucionEsperada__lt=fecha_actual
+    ).order_by('fechaDevolucionEsperada')
+    
+    # Filtros
+    usuario_id = request.query_params.get('usuario')
+    if usuario_id:
+        prestamos = prestamos.filter(usuario_id=usuario_id)
+    
+    dias_vencido = request.query_params.get('dias_vencido')
+    if dias_vencido:
+        try:
+            dias_vencido = int(dias_vencido)
+            fecha_limite = fecha_actual - timedelta(days=dias_vencido)
+            prestamos = prestamos.filter(fechaDevolucionEsperada__lte=fecha_limite)
+        except ValueError:
+            pass
+    
+    # Agregar información adicional
+    resultado = []
+    for prestamo in prestamos:
+        dias_vencido = (fecha_actual - prestamo.fechaDevolucionEsperada).days
+        multa_estimada = dias_vencido * 10.00  # 10 Lempiras por día
+        
+        prestamo_data = PrestamoSerializer(prestamo).data
+        prestamo_data['dias_vencido'] = dias_vencido
+        prestamo_data['multa_estimada'] = multa_estimada
+        
+        resultado.append(prestamo_data)
+    
+    return Response(resultado, status=status.HTTP_200_OK)
+
+# ==================== ESCENARIO 6: GESTIÓN ADMINISTRATIVA COMPLETA ====================
+
+@extend_schema(
+    summary="Cambiar rol de usuario",
+    description="Cambia el rol de un usuario. Solo administradores pueden ejecutar esta acción.",
+    parameters=[
+        OpenApiParameter(
+            name='id',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description='ID del usuario',
+            required=True
+        ),
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    request={
+        'application/json': {
+            'type': 'object',
+            'properties': {
+                'rol': {'type': 'string', 'enum': ['usuario', 'bibliotecario', 'admin'], 'example': 'bibliotecario'},
+            },
+            'required': ['rol'],
+            'example': {
+                'rol': 'bibliotecario'
+            }
+        }
+    },
+    responses={
+        200: {
+            'description': 'Rol actualizado exitosamente',
+            'examples': {
+                'application/json': {
+                    'mensaje': 'Rol actualizado exitosamente',
+                    'usuario': {
+                        'id': 1,
+                        'nombre': 'Juan',
+                        'apellido': 'Pérez',
+                        'correo': 'juan.perez@email.com',
+                        'rol': 'bibliotecario'
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Error de validación',
+            'examples': {
+                'application/json': {
+                    'error': 'Rol inválido',
+                    'error': 'No puedes cambiar tu propio rol'
+                }
+            }
+        },
+        404: {
+            'description': 'Usuario no encontrado',
+            'examples': {
+                'application/json': {
+                    'error': 'Usuario no encontrado'
+                }
+            }
+        }
+    },
+    tags=['Administración']
+)
+@api_view(['PUT'])
+@requiere_autenticacion
+@requiere_rol('admin')
+def cambiar_rol_usuario(request, id):
+    """Cambia el rol de un usuario"""
+    try:
+        usuario = Usuario.objects.get(id=id)
+    except Usuario.DoesNotExist:
+        return Response(
+            {'error': 'Usuario no encontrado'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Validar que no se cambie el propio rol
+    if usuario.id == request.usuario.id:
+        return Response(
+            {'error': 'No puedes cambiar tu propio rol'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    nuevo_rol = request.data.get('rol')
+    if nuevo_rol not in ['usuario', 'bibliotecario', 'admin']:
+        return Response(
+            {'error': 'Rol inválido. Debe ser: usuario, bibliotecario o admin'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    usuario.rol = nuevo_rol
+    usuario.save()
+    
+    usuario_data = UsuarioSerializer(usuario).data
+    return Response({
+        'mensaje': 'Rol actualizado exitosamente',
+        'usuario': usuario_data
+    }, status=status.HTTP_200_OK)
+
+@extend_schema(
+    summary="Gestionar multas de usuario",
+    description="Agrega o reduce multas de un usuario. Solo bibliotecarios y administradores pueden ejecutar esta acción.",
+    parameters=[
+        OpenApiParameter(
+            name='id',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description='ID del usuario',
+            required=True
+        ),
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    request={
+        'application/json': {
+            'type': 'object',
+            'properties': {
+                'accion': {'type': 'string', 'enum': ['agregar', 'reducir', 'establecer'], 'example': 'agregar'},
+                'monto': {'type': 'number', 'example': 50.00},
+            },
+            'required': ['accion', 'monto'],
+            'example': {
+                'accion': 'agregar',
+                'monto': 50.00
+            }
+        }
+    },
+    responses={
+        200: {
+            'description': 'Multa gestionada exitosamente',
+            'examples': {
+                'application/json': {
+                    'mensaje': 'Multa actualizada exitosamente',
+                    'usuario': {
+                        'id': 1,
+                        'nombre': 'Juan',
+                        'apellido': 'Pérez',
+                        'multas': 50.00
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Error de validación',
+            'examples': {
+                'application/json': {
+                    'error': 'Acción inválida',
+                    'error': 'El monto no puede ser negativo'
+                }
+            }
+        },
+        404: {
+            'description': 'Usuario no encontrado',
+            'examples': {
+                'application/json': {
+                    'error': 'Usuario no encontrado'
+                }
+            }
+        }
+    },
+    tags=['Administración']
+)
+@api_view(['PUT'])
+@requiere_autenticacion
+@requiere_rol('bibliotecario', 'admin')
+def gestionar_multa(request, id):
+    """Gestiona las multas de un usuario"""
+    try:
+        usuario = Usuario.objects.get(id=id)
+    except Usuario.DoesNotExist:
+        return Response(
+            {'error': 'Usuario no encontrado'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    accion = request.data.get('accion')
+    monto = request.data.get('monto')
+    
+    if not accion or monto is None:
+        return Response(
+            {'error': 'Los campos "accion" y "monto" son requeridos'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        monto = float(monto)
+        if monto < 0:
+            return Response(
+                {'error': 'El monto no puede ser negativo'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    except (ValueError, TypeError):
+        return Response(
+            {'error': 'El monto debe ser un número válido'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Aplicar acción
+    if accion == 'agregar':
+        usuario.multas += monto
+    elif accion == 'reducir':
+        usuario.multas = max(0, usuario.multas - monto)  # No permitir multas negativas
+    elif accion == 'establecer':
+        usuario.multas = monto
+    else:
+        return Response(
+            {'error': 'Acción inválida. Debe ser: agregar, reducir o establecer'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    usuario.save()
+    
+    usuario_data = UsuarioSerializer(usuario).data
+    return Response({
+        'mensaje': 'Multa actualizada exitosamente',
+        'usuario': usuario_data
+    }, status=status.HTTP_200_OK)
+
+@extend_schema(
+    summary="Activar/desactivar cuenta de usuario",
+    description="Activa o desactiva la cuenta de un usuario. Solo bibliotecarios y administradores pueden ejecutar esta acción.",
+    parameters=[
+        OpenApiParameter(
+            name='id',
+            type=OpenApiTypes.INT,
+            location=OpenApiParameter.PATH,
+            description='ID del usuario',
+            required=True
+        ),
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    responses={
+        200: {
+            'description': 'Estado actualizado exitosamente',
+            'examples': {
+                'application/json': {
+                    'mensaje': 'Cuenta desactivada exitosamente',
+                    'usuario': {
+                        'id': 1,
+                        'nombre': 'Juan',
+                        'apellido': 'Pérez',
+                        'activo': False
+                    }
+                }
+            }
+        },
+        400: {
+            'description': 'Error de validación',
+            'examples': {
+                'application/json': {
+                    'error': 'No puedes desactivar tu propia cuenta'
+                }
+            }
+        },
+        404: {
+            'description': 'Usuario no encontrado',
+            'examples': {
+                'application/json': {
+                    'error': 'Usuario no encontrado'
+                }
+            }
+        }
+    },
+    tags=['Administración']
+)
+@api_view(['PUT'])
+@requiere_autenticacion
+@requiere_rol('bibliotecario', 'admin')
+def toggle_estado_usuario(request, id):
+    """Activa o desactiva la cuenta de un usuario"""
+    try:
+        usuario = Usuario.objects.get(id=id)
+    except Usuario.DoesNotExist:
+        return Response(
+            {'error': 'Usuario no encontrado'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Validar que no se desactive la propia cuenta
+    if usuario.id == request.usuario.id:
+        return Response(
+            {'error': 'No puedes desactivar tu propia cuenta'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Cambiar estado
+    usuario.activo = not usuario.activo
+    usuario.save()
+    
+    estado_texto = 'activada' if usuario.activo else 'desactivada'
+    usuario_data = UsuarioSerializer(usuario).data
+    
+    return Response({
+        'mensaje': f'Cuenta {estado_texto} exitosamente',
+        'usuario': usuario_data
+    }, status=status.HTTP_200_OK)
+
+@extend_schema(
+    summary="Dashboard de estadísticas",
+    description="Retorna estadísticas generales del sistema. Solo administradores pueden acceder.",
+    parameters=[
+        OpenApiParameter(
+            name='Authorization',
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.HEADER,
+            description='Token JWT: Bearer {token}',
+            required=True
+        )
+    ],
+    responses={
+        200: {
+            'description': 'Estadísticas del sistema',
+            'examples': {
+                'application/json': {
+                    'usuarios': {
+                        'total': 150,
+                        'activos': 145,
+                        'inactivos': 5,
+                        'por_rol': [
+                            {'rol': 'usuario', 'total': 140},
+                            {'rol': 'bibliotecario', 'total': 8},
+                            {'rol': 'admin', 'total': 2}
+                        ]
+                    },
+                    'libros': {
+                        'total': 500,
+                        'disponibles': 450,
+                        'copias_prestadas': 50
+                    },
+                    'prestamos': {
+                        'total': 1200,
+                        'activos': 50,
+                        'vencidos': 5,
+                        'devueltos': 1145
+                    },
+                    'reservas': {
+                        'total': 30,
+                        'pendientes': 20,
+                        'notificadas': 10,
+                        'completadas': 0
+                    },
+                    'multas': {
+                        'total': 500.00,
+                        'usuarios_con_multas': 10
+                    },
+                    'libros_populares': [
+                        {
+                            'id': 1,
+                            'titulo': 'El Quijote',
+                            'autor': 'Miguel de Cervantes',
+                            'total_prestamos': 25
+                        }
+                    ]
+                }
+            }
+        }
+    },
+    tags=['Administración']
+)
+@api_view(['GET'])
+@requiere_autenticacion
+@requiere_rol('admin')
+def estadisticas(request):
+    """Retorna estadísticas generales del sistema"""
+    # Estadísticas de usuarios
+    total_usuarios = Usuario.objects.count()
+    usuarios_activos = Usuario.objects.filter(activo=True).count()
+    usuarios_inactivos = total_usuarios - usuarios_activos
+    
+    # Estadísticas de libros
+    total_libros = Libro.objects.count()
+    libros_disponibles = Libro.objects.filter(copiasDisponibles__gt=0).count()
+    total_copias_prestadas = sum(
+        libro.copiasTotal - libro.copiasDisponibles 
+        for libro in Libro.objects.all()
+    )
+    
+    # Estadísticas de préstamos
+    total_prestamos = Prestamo.objects.count()
+    prestamos_activos = Prestamo.objects.filter(estado='activo').count()
+    prestamos_vencidos = Prestamo.objects.filter(
+        estado='activo',
+        fechaDevolucionEsperada__lt=timezone.now()
+    ).count()
+    prestamos_devueltos = Prestamo.objects.filter(estado='devuelto').count()
+    
+    # Estadísticas de reservas
+    total_reservas = Reserva.objects.count()
+    reservas_pendientes = Reserva.objects.filter(estado='pendiente').count()
+    reservas_notificadas = Reserva.objects.filter(estado='notificada').count()
+    reservas_completadas = Reserva.objects.filter(estado='completada').count()
+    
+    # Estadísticas de multas
+    total_multas = Usuario.objects.aggregate(Sum('multas'))['multas__sum'] or 0.00
+    usuarios_con_multas = Usuario.objects.filter(multas__gt=0).count()
+    
+    # Estadísticas por rol
+    usuarios_por_rol = Usuario.objects.values('rol').annotate(
+        total=Count('id')
+    )
+    
+    # Libros más prestados (top 5)
+    libros_mas_prestados = Libro.objects.annotate(
+        total_prestamos=Count('prestamos')
+    ).order_by('-total_prestamos')[:5]
+    
+    libros_populares_data = [
+        {
+            'id': libro.id,
+            'titulo': libro.titulo,
+            'autor': libro.autor,
+            'total_prestamos': libro.total_prestamos
+        }
+        for libro in libros_mas_prestados
+    ]
+    
+    estadisticas_data = {
+        'usuarios': {
+            'total': total_usuarios,
+            'activos': usuarios_activos,
+            'inactivos': usuarios_inactivos,
+            'por_rol': list(usuarios_por_rol)
+        },
+        'libros': {
+            'total': total_libros,
+            'disponibles': libros_disponibles,
+            'copias_prestadas': total_copias_prestadas
+        },
+        'prestamos': {
+            'total': total_prestamos,
+            'activos': prestamos_activos,
+            'vencidos': prestamos_vencidos,
+            'devueltos': prestamos_devueltos
+        },
+        'reservas': {
+            'total': total_reservas,
+            'pendientes': reservas_pendientes,
+            'notificadas': reservas_notificadas,
+            'completadas': reservas_completadas
+        },
+        'multas': {
+            'total': float(total_multas),
+            'usuarios_con_multas': usuarios_con_multas
+        },
+        'libros_populares': libros_populares_data
+    }
+    
+    return Response(estadisticas_data, status=status.HTTP_200_OK)
+
