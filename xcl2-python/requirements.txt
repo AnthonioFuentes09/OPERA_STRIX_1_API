@@ -1,0 +1,7 @@
+django~=5.2
+djangorestframework==3.16.1
+requests
+PyJWT==2.8.0
+python-decouple==3.8
+drf-spectacular==0.27.2
+
